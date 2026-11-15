@@ -1,6 +1,11 @@
-<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Strong 60">
 <title>Strong After 60</title>
-<meta name="claude:viewport-fit-sides" content="cover">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&display=swap">
 <style>
 /* Layout: one phone-width column. Scoreboard header, 4-week grid, then the selected day's session. */
@@ -28,7 +33,14 @@
   --accent: #3cbcae; --accent-ink: #06201d; --walk: #e2ae52; --soft: #1f3336; color-scheme: dark;
 }
 * { box-sizing: border-box; }
+html { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); -webkit-text-size-adjust: 100%; }
+[hidden] { display: none !important; }
+.sync p { margin: 10px 0; font-size: 14px; color: var(--muted); }
+.sync form { display: flex; gap: 8px; flex-wrap: wrap; }
+.sync input { flex: 1; min-width: 0; font: inherit; font-size: 16px; padding: 9px 10px; border: 1.5px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); }
+.sync button { border: 1.5px solid var(--line); background: var(--soft); border-radius: 8px; padding: 9px 14px; font-weight: 600; }
 body {
+  margin: 0;
   background: var(--bg); color: var(--ink);
   font-family: var(--body); font-size: 16px; line-height: 1.45;
   padding-left: max(16px, env(safe-area-inset-left, 0px));
@@ -110,6 +122,8 @@ details ul { margin: 10px 0 2px; padding-left: 20px; display: flex; flex-directi
 .confirm button { border: 1.5px solid var(--line); background: var(--surface); border-radius: 8px; padding: 6px 12px; font-size: 13px; font-weight: 600; }
 @media (prefers-reduced-motion: reduce) { .ring .bar, .tick svg { transition: none; } }
 </style>
+</head>
+<body>
 
 <div class="app">
   <header class="top">
@@ -139,8 +153,18 @@ details ul { margin: 10px 0 2px; padding-left: 20px; display: flex; flex-directi
     </ul>
   </details>
 
+  <details class="sync" id="sync">
+    <summary>GitHub sync</summary>
+    <p id="syncInfo">Save your progress to <b>ex-progress.json</b> in the galshaydemo/taichi repository. Paste a fine-grained access token that has <b>Contents: Read and write</b> on that repository only. The token stays on this phone.</p>
+    <form id="syncForm">
+      <input id="tokenInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="github_pat_..." aria-label="GitHub access token">
+      <button type="submit">Connect</button>
+    </form>
+    <button type="button" id="syncOff" hidden>Disconnect this phone</button>
+  </details>
+
   <footer class="foot">
-    <span id="saveStatus">Progress is saved on this device.</span>
+    <span id="saveStatus">Progress is saved on this phone.</span>
     <span id="resetWrap"><button class="link" id="resetBtn" type="button">Reset progress</button></span>
   </footer>
 </div>
@@ -362,7 +386,9 @@ details ul { margin: 10px 0 2px; padding-left: 20px; display: flex; flex-directi
   var KEY = "strong-after-60";
   var state = { done: {}, checks: {}, updated: 0 };
   var selected = 1;
-  var cloudRef = null, saving = false, dirty = false;
+  var GH = { owner: "galshaydemo", repo: "taichi", branch: "master", path: "ex-progress.json" };
+  var TOKEN_KEY = KEY + "-gh-token";
+  var token = "", sha = null, saving = false, dirty = false, pushTimer = 0;
 
   function clean(raw) {
     var s = { done: {}, checks: {}, updated: 0 };
@@ -380,43 +406,94 @@ details ul { margin: 10px 0 2px; padding-left: 20px; display: flex; flex-directi
   function save() {
     state.updated = Date.now();
     try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* storage unavailable */ }
-    pushCloud();
+    if (token) { clearTimeout(pushTimer); pushTimer = setTimeout(pushCloud, 2000); }
   }
-  function pushCloud() {
-    if (!cloudRef) return;
+  function setStatus(text) { document.getElementById("saveStatus").textContent = text; }
+  function gh(method, body) {
+    var url = "https://api.github.com/repos/" + GH.owner + "/" + GH.repo + "/contents/" + GH.path;
+    if (method === "GET") url += "?ref=" + GH.branch;
+    return fetch(url, {
+      method: method, cache: "no-store",
+      headers: { Accept: "application/vnd.github+json", Authorization: "Bearer " + token },
+      body: body ? JSON.stringify(body) : undefined
+    });
+  }
+  function pullCloud() {
+    return gh("GET").then(function (res) {
+      if (res.status === 404) { sha = null; return null; }
+      if (!res.ok) throw new Error(String(res.status));
+      return res.json().then(function (j) {
+        sha = j.sha;
+        return clean(JSON.parse(atob(String(j.content).replace(/\s/g, ""))));
+      });
+    });
+  }
+  function pushCloud(isRetry) {
+    if (!token) return;
     if (saving) { dirty = true; return; }
     saving = true;
-    cloudRef.set(JSON.parse(JSON.stringify(state))).catch(function () {
-      document.getElementById("saveStatus").textContent = "Could not sync. Progress is saved on this device.";
-    }).then(function () {
+    setStatus("Saving to GitHub...");
+    var body = { message: "Update workout progress", branch: GH.branch, content: btoa(JSON.stringify(state)) };
+    if (sha) body.sha = sha;
+    gh("PUT", body).then(function (res) {
+      if ((res.status === 409 || res.status === 422) && !isRetry) {
+        return pullCloud().then(function () { saving = false; pushCloud(true); return "retry"; });
+      }
+      if (!res.ok) throw new Error(String(res.status));
+      return res.json().then(function (j) { sha = j.content.sha; setStatus("Saved to GitHub."); });
+    }).catch(function (e) {
+      setStatus(e.message === "401" || e.message === "403"
+        ? "GitHub refused the token. Reconnect under GitHub sync."
+        : "Could not save to GitHub. Progress is kept on this phone.");
+    }).then(function (r) {
+      if (r === "retry") return;
       saving = false;
       if (dirty) { dirty = false; pushCloud(); }
     });
   }
-  function initCloud() {
-    if (!window.claude || !window.claude.use) return;
-    Promise.all([window.claude.use("db"), window.claude.use("user")]).then(function (r) {
-      var db = r[0], user = r[1];
-      if (!db || !user) return null;
-      return user.id().then(function (id) {
-        if (!id) return null;
-        var ref = db.collection("data/users/" + id).doc("progress");
-        return ref.get().then(function (snap) {
-          cloudRef = ref;
-          var remote = snap.exists ? clean(snap.data()) : null;
-          if (remote && remote.updated >= state.updated) {
-            state = remote;
-            try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* storage unavailable */ }
-            selected = firstOpenDay();
-            renderAll();
-          } else if (state.updated) {
-            pushCloud();
-          }
-          document.getElementById("saveStatus").textContent = "Progress syncs to your Claude account.";
-        });
-      });
-    }).catch(function () { /* stay local */ });
+  function showSync() {
+    document.getElementById("syncForm").hidden = !!token;
+    document.getElementById("syncOff").hidden = !token;
+    if (!token) setStatus("Progress is saved on this phone.");
   }
+  function initCloud() {
+    try { token = localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { token = ""; }
+    showSync();
+    if (!token) return;
+    setStatus("Loading from GitHub...");
+    pullCloud().then(function (remote) {
+      if (remote && remote.updated >= state.updated) {
+        state = remote;
+        try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* storage unavailable */ }
+        selected = firstOpenDay();
+        renderAll();
+        setStatus("Loaded from GitHub.");
+      } else if (state.updated) {
+        pushCloud();
+      } else {
+        setStatus("Connected to GitHub.");
+      }
+    }).catch(function (e) {
+      setStatus(e.message === "401" || e.message === "403"
+        ? "GitHub refused the token. Reconnect under GitHub sync."
+        : "Could not reach GitHub. Progress is kept on this phone.");
+    });
+  }
+  document.getElementById("syncForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var input = document.getElementById("tokenInput");
+    var value = input.value.trim();
+    if (!value) return;
+    try { localStorage.setItem(TOKEN_KEY, value); } catch (err) { /* storage unavailable */ }
+    input.value = "";
+    initCloud();
+    if (!token) { token = value; showSync(); }
+  });
+  document.getElementById("syncOff").addEventListener("click", function () {
+    try { localStorage.removeItem(TOKEN_KEY); } catch (err) { /* storage unavailable */ }
+    token = ""; sha = null;
+    showSync();
+  });
 
   /* ---------- Helpers ---------- */
   function sessionOf(day) { return SESSIONS[(day - 1) % 7]; }
@@ -564,5 +641,5 @@ details ul { margin: 10px 0 2px; padding-left: 20px; display: flex; flex-directi
   initCloud();
 })();
 </script>
-
-</body></html>
+</body>
+</html>
